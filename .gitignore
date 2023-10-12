@@ -5,7 +5,11 @@
 **/wandb
 **/train_logs
 **/slurm-*.out
-
+**/data/
+**/reconstructions/
+**/seeds/
 *.pth
+*.pt
+**/versatile_diffusion/
 src/evals
 src/evals-*

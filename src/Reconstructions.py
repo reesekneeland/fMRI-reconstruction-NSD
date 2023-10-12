@@ -14,6 +14,7 @@
 
 
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = "3"
 import sys
 import json
 import numpy as np
@@ -27,7 +28,7 @@ import webdataset as wds
 import PIL
 import argparse
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 local_rank = 0
 print("device:",device)
 
@@ -190,13 +191,13 @@ except:
     print("Downloading Versatile Diffusion to", vd_cache_dir)
     vd_pipe =  VersatileDiffusionDualGuidedPipeline.from_pretrained(
             "shi-labs/versatile-diffusion",
-            cache_dir = vd_cache_dir).to(device)
+            cache_dir = vd_cache_dir).to(device).to(torch.float16)
 vd_pipe.image_unet.eval()
 vd_pipe.vae.eval()
 vd_pipe.image_unet.requires_grad_(False)
 vd_pipe.vae.requires_grad_(False)
 
-vd_pipe.scheduler = UniPCMultistepScheduler.from_pretrained(vd_cache_dir, subfolder="scheduler")
+vd_pipe.scheduler = UniPCMultistepScheduler.from_pretrained(vd_cache_dir + "/models--shi-labs--versatile-diffusion/snapshots/2926f8e11ea526b562cd592b099fcf9c2985d0b7", subfolder="scheduler")
 num_inference_steps = 20
 
 # Set weighting of Dual-Guidance 
@@ -378,7 +379,9 @@ for val_i, (voxel, img, coco) in enumerate(tqdm(val_dl,total=len(ind_include))):
         if only_lowlevel:
             brain_recons = blurry_recons
         else:
-            grid, brain_recons, laion_best_picks, recon_img = utils.reconstruction(
+            os.makedirs("../reconstructions/subject{}/{}/".format(subj, val_i), exist_ok=True)
+            os.makedirs("../seeds/subject{}/{}/".format(subj, val_i), exist_ok=True)
+            grid, brain_recons, laion_best_picks, recon_img, extracted_clip = utils.reconstruction(
                 img, voxel,
                 clip_extractor, unet, vae, noise_scheduler,
                 voxel2clip_cls = None, #diffusion_prior_cls.voxel2clip,
@@ -403,6 +406,20 @@ for val_i, (voxel, img, coco) in enumerate(tqdm(val_dl,total=len(ind_include))):
                 # grid.savefig(f'evals/{model_name}_{val_i}.png')
 
             brain_recons = brain_recons[:,laion_best_picks.astype(np.int8)]
+            # resized_img = transforms.Resize((512,512))(brain_recons)
+            pil_rec = transforms.ToPILImage()(brain_recons[0, 0, :, :, :])
+            # print(brain_recons)
+            # pil_im = PIL.Image.fromarray((brain_recons.reshape(512, 512, 3).cpu().numpy() * 255).astype(np.uint8))
+            
+            pil_rec.save("../reconstructions/subject{}/{}/mindeye.png".format(subj, val_i))
+            # print(img.shape)
+            pil_im = transforms.ToPILImage()(img[0, :, :, :]).resize((512, 512))
+            pil_im.save("../reconstructions/subject{}/{}/ground_truth.png".format(subj, val_i))
+            # print(blurry_recons.shape)
+            pil_low_level = transforms.ToPILImage()(blurry_recons[0, :, :, :])
+            pil_low_level.save("../reconstructions/subject{}/{}/low_level.png".format(subj, val_i))
+            pil_low_level.save("../seeds/subject{}/{}/low_level.png".format(subj, val_i))
+            torch.save(extracted_clip, "../seeds/subject{}/{}/clip.pt".format(subj, val_i))
 
         if all_brain_recons is None:
             all_brain_recons = brain_recons
@@ -424,4 +441,3 @@ print(f'recon_path: {model_name}_recons_img2img{img2img_strength}_{recons_per_sa
 
 if not utils.is_interactive():
     sys.exit(0)
-

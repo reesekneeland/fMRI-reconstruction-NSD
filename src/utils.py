@@ -21,7 +21,7 @@ import time
 import braceexpand
 from models import Clipper,OpenClipper
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 def is_interactive():
     import __main__ as main
@@ -548,6 +548,7 @@ def reconstruction(
             brain_clip_embeddings = brain_clip_embeddings.unsqueeze(1)
         
         input_embedding = brain_clip_embeddings#.repeat(recons_per_sample, 1, 1)
+        extracted_clip = input_embedding
         if verbose: print("input_embedding",input_embedding.shape)
 
         if text_token is not None:
@@ -597,7 +598,7 @@ def reconstruction(
         for i, t in enumerate(timesteps):
             # expand the latents if we are doing classifier free guidance
             latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-            latent_model_input = noise_scheduler.scale_model_input(latent_model_input, t)
+            latent_model_input = noise_scheduler.scale_model_input(latent_model_input, t).to(device)
 
             if verbose: print("latent_model_input", latent_model_input.shape)
             if verbose: print("input_embedding", input_embedding.shape)
@@ -646,7 +647,7 @@ def reconstruction(
         best_picks[0] = int(np.nanargmax(sims)) 
         if verbose: print(best_picks)
         recon_img = image_retrieved[best_picks[0]]
-    
+    extracted_clip = extracted_clip[best_picks[0]]
     if recons_per_sample==0 and retrieve:
         recon_is_laion = True
         recons_per_sample = 1 # brain reconstruction will simply be the LAION nearest neighbor
@@ -687,8 +688,7 @@ def reconstruction(
             ax[-1].imshow(torch_to_Image(image_retrieved0))
         for i in range(num_xaxis_subplots):
             ax[i].axis('off')
-    
-    return fig, brain_recons, best_picks, recon_img
+    return fig, brain_recons, best_picks, recon_img, extracted_clip
 
 def dynamic_cfg(noise_pred_uncond,noise_pred_text,guidance_scale):
     # DYNAMIC CFG: https://twitter.com/Birchlabs/status/1583984004864172032
