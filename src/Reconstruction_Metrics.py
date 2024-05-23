@@ -29,7 +29,7 @@ from tqdm import tqdm
 from datetime import datetime
 import argparse
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 local_rank = 0
 print("device:",device)
 
@@ -82,280 +82,306 @@ else:
 for attribute_name in vars(args).keys():
     globals()[attribute_name] = getattr(args, attribute_name)
 
-
+df = pd.DataFrame(columns=["PixCorr", "SSIM", "AlexNet(2)", "AlexNet(5)", "AlexNet(7)", "InceptionV3", "CLIP", "EffNet-B", "SwAV"])
+df_row_num = 0
 # In[6]:
 
 
-all_brain_recons = torch.load(f'{recon_path}')
-all_images = torch.load(f'{all_images_path}')
+# all_brain_recons = torch.load(f'{recon_path}')
+# Load all images into a tensor file
+# recon_path = "/home/naxos2-raid25/kneel027/home/kneel027/Second-Sight/output/mindeye_nsd_vision/"
+recon_path = "/home/naxos2-raid25/kneel027/home/kneel027/Second-Sight/output/tagaki_nsd_vision/"
+# recon_path = "/home/naxos2-raid25/kneel027/home/kneel027/Second-Sight/output/mindeye_extension_v6/"
+# subject = 1
+# rep = 0
+for subject in [1,2,5,7]:
+    for rep in range(5):
+        all_brain_recons = torch.zeros((982, 3, 512, 512))
+        for i in tqdm(range(982)):
+            image_path = f"{recon_path}subject{subject}/{i}/{rep}.png"
+            # image_path = f"{recon_path}subject{subject}/{i}/best_distribution/images/{rep}.png"
+            all_brain_recons[i] = transforms.ToTensor()(plt.imread(image_path))
+        all_images = torch.load(f'{all_images_path}')
 
-print(all_images.shape)
-print(all_brain_recons.shape)
+        print(all_images.shape)
+        print(all_brain_recons.shape)
 
-all_images = all_images.to(device)
-all_brain_recons = all_brain_recons.to(device).to(all_images.dtype).clamp(0,1)
+        all_images = all_images.to(device)
+        all_brain_recons = all_brain_recons.to(device).to(all_images.dtype).clamp(0,1)
 
 
-# # Display reconstructions next to ground truth images
+        # # Display reconstructions next to ground truth images
 
-# In[8]:
+        # In[8]:
 
 
-imsize = 256
-all_images = transforms.Resize((imsize,imsize))(all_images)
-all_brain_recons = transforms.Resize((imsize,imsize))(all_brain_recons)
+        imsize = 256
+        all_images = transforms.Resize((imsize,imsize))(all_images)
+        all_brain_recons = transforms.Resize((imsize,imsize))(all_brain_recons)
 
-np.random.seed(0)
-ind = np.flip(np.array([112,119,101,44,159,22,173,174,175,189,981,243,249,255,265]))
+        np.random.seed(0)
+        ind = np.flip(np.array([112,119,101,44,159,22,173,174,175,189,981,243,249,255,265]))
 
-all_interleaved = torch.zeros(len(ind)*2,3,imsize,imsize)
-icount = 0
-for t in ind:
-    all_interleaved[icount] = all_images[t]
-    all_interleaved[icount+1] = all_brain_recons[t]
-    icount += 2
+        all_interleaved = torch.zeros(len(ind)*2,3,imsize,imsize)
+        icount = 0
+        for t in ind:
+            all_interleaved[icount] = all_images[t]
+            all_interleaved[icount+1] = all_brain_recons[t]
+            icount += 2
 
-plt.rcParams["savefig.bbox"] = 'tight'
-def show(imgs,figsize):
-    if not isinstance(imgs, list):
-        imgs = [imgs]
-    fig, axs = plt.subplots(ncols=len(imgs), squeeze=False, figsize=figsize)
-    for i, img in enumerate(imgs):
-        img = img.detach()
-        img = transforms.ToPILImage()(img)
-        axs[0, i].imshow(np.asarray(img))
-        axs[0, i].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
-    
-grid = make_grid(all_interleaved, nrow=10, padding=2)
-show(grid,figsize=(20,16))
+        # plt.rcParams["savefig.bbox"] = 'tight'
+        # def show(imgs,figsize):
+        #     if not isinstance(imgs, list):
+        #         imgs = [imgs]
+        #     fig, axs = plt.subplots(ncols=len(imgs), squeeze=False, figsize=figsize)
+        #     for i, img in enumerate(imgs):
+        #         img = img.detach()
+        #         img = transforms.ToPILImage()(img)
+        #         axs[0, i].imshow(np.asarray(img))
+        #         axs[0, i].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
+            
+        # grid = make_grid(all_interleaved, nrow=10, padding=2)
+        # show(grid,figsize=(20,16))
 
 
-# # 2-Way Identification
+        # # 2-Way Identification
 
-# In[9]:
+        # In[9]:
 
 
-from torchvision.models.feature_extraction import create_feature_extractor, get_graph_node_names
+        from torchvision.models.feature_extraction import create_feature_extractor, get_graph_node_names
 
-@torch.no_grad()
-def two_way_identification(all_brain_recons, all_images, model, preprocess, feature_layer=None, return_avg=True):
-    preds = model(torch.stack([preprocess(recon) for recon in all_brain_recons], dim=0).to(device))
-    reals = model(torch.stack([preprocess(indiv) for indiv in all_images], dim=0).to(device))
-    if feature_layer is None:
-        preds = preds.float().flatten(1).cpu().numpy()
-        reals = reals.float().flatten(1).cpu().numpy()
-    else:
-        preds = preds[feature_layer].float().flatten(1).cpu().numpy()
-        reals = reals[feature_layer].float().flatten(1).cpu().numpy()
+        @torch.no_grad()
+        def two_way_identification(all_brain_recons, all_images, model, preprocess, feature_layer=None, return_avg=True):
+            preds = model(torch.stack([preprocess(recon) for recon in all_brain_recons], dim=0).to(device))
+            reals = model(torch.stack([preprocess(indiv) for indiv in all_images], dim=0).to(device))
+            if feature_layer is None:
+                preds = preds.float().flatten(1).cpu().numpy()
+                reals = reals.float().flatten(1).cpu().numpy()
+            else:
+                preds = preds[feature_layer].float().flatten(1).cpu().numpy()
+                reals = reals[feature_layer].float().flatten(1).cpu().numpy()
 
-    r = np.corrcoef(reals, preds)
-    r = r[:len(all_images), len(all_images):]
-    congruents = np.diag(r)
+            r = np.corrcoef(reals, preds)
+            r = r[:len(all_images), len(all_images):]
+            congruents = np.diag(r)
 
-    success = r < congruents
-    success_cnt = np.sum(success, 0)
+            success = r < congruents
+            success_cnt = np.sum(success, 0)
 
-    if return_avg:
-        perf = np.mean(success_cnt) / (len(all_images)-1)
-        return perf
-    else:
-        return success_cnt, len(all_images)-1
+            if return_avg:
+                perf = np.mean(success_cnt) / (len(all_images)-1)
+                return perf
+            else:
+                return success_cnt, len(all_images)-1
 
 
-# ## PixCorr
+        # ## PixCorr
 
-# In[10]:
+        # In[10]:
 
 
-preprocess = transforms.Compose([
-    transforms.Resize(425, interpolation=transforms.InterpolationMode.BILINEAR),
-])
+        preprocess = transforms.Compose([
+            transforms.Resize(425, interpolation=transforms.InterpolationMode.BILINEAR),
+        ])
 
-# Flatten images while keeping the batch dimension
-all_images_flattened = preprocess(all_images).reshape(len(all_images), -1).cpu()
-all_brain_recons_flattened = preprocess(all_brain_recons).view(len(all_brain_recons), -1).cpu()
+        # Flatten images while keeping the batch dimension
+        all_images_flattened = preprocess(all_images).reshape(len(all_images), -1).cpu()
+        all_brain_recons_flattened = preprocess(all_brain_recons).view(len(all_brain_recons), -1).cpu()
 
-print(all_images_flattened.shape)
-print(all_brain_recons_flattened.shape)
+        print(all_images_flattened.shape)
+        print(all_brain_recons_flattened.shape)
 
-corrsum = 0
-for i in tqdm(range(982)):
-    corrsum += np.corrcoef(all_images_flattened[i], all_brain_recons_flattened[i])[0][1]
-corrmean = corrsum / 982
+        corrsum = 0
+        for i in tqdm(range(982)):
+            corrsum += np.corrcoef(all_images_flattened[i], all_brain_recons_flattened[i])[0][1]
+        corrmean = corrsum / 982
 
-pixcorr = corrmean
-print(pixcorr)
+        pixcorr = corrmean
+        print(pixcorr)
 
 
-# ## SSIM
+        # ## SSIM
 
-# In[11]:
+        # In[11]:
 
 
-# see https://github.com/zijin-gu/meshconv-decoding/issues/3
-from skimage.color import rgb2gray
-from skimage.metrics import structural_similarity as ssim
+        # see https://github.com/zijin-gu/meshconv-decoding/issues/3
+        from skimage.color import rgb2gray
+        from skimage.metrics import structural_similarity as ssim
 
-preprocess = transforms.Compose([
-    transforms.Resize(425, interpolation=transforms.InterpolationMode.BILINEAR), 
-])
+        preprocess = transforms.Compose([
+            transforms.Resize(425, interpolation=transforms.InterpolationMode.BILINEAR), 
+        ])
 
-# convert image to grayscale with rgb2grey
-img_gray = rgb2gray(preprocess(all_images).permute((0,2,3,1)).cpu())
-recon_gray = rgb2gray(preprocess(all_brain_recons).permute((0,2,3,1)).cpu())
-print("converted, now calculating ssim...")
+        # convert image to grayscale with rgb2grey
+        img_gray = rgb2gray(preprocess(all_images).permute((0,2,3,1)).cpu())
+        recon_gray = rgb2gray(preprocess(all_brain_recons).permute((0,2,3,1)).cpu())
+        print("converted, now calculating ssim...")
 
-ssim_score=[]
-for im,rec in tqdm(zip(img_gray,recon_gray),total=len(all_images)):
-    ssim_score.append(ssim(rec, im, multichannel=True, gaussian_weights=True, sigma=1.5, use_sample_covariance=False, data_range=1.0))
+        ssim_score=[]
+        for im,rec in tqdm(zip(img_gray,recon_gray),total=len(all_images)):
+            ssim_score.append(ssim(rec, im, multichannel=True, gaussian_weights=True, sigma=1.5, use_sample_covariance=False, data_range=1.0))
 
-ssim = np.mean(ssim_score)
-print(ssim)
+        ssim = np.mean(ssim_score)
+        print(ssim)
 
 
-# ### AlexNet
+        # ### AlexNet
 
-# In[12]:
+        # In[12]:
 
 
-from torchvision.models import alexnet, AlexNet_Weights
-alex_weights = AlexNet_Weights.IMAGENET1K_V1
+        from torchvision.models import alexnet, AlexNet_Weights
+        alex_weights = AlexNet_Weights.IMAGENET1K_V1
 
-alex_model = create_feature_extractor(alexnet(weights=alex_weights), return_nodes=['features.4','features.11']).to(device)
-alex_model.eval().requires_grad_(False)
+        alex_model = create_feature_extractor(alexnet(weights=alex_weights), return_nodes=['features.4','features.11', 'classifier.5']).to(device)
+        alex_model.eval().requires_grad_(False)
 
-# see alex_weights.transforms()
-preprocess = transforms.Compose([
-    transforms.Resize(256, interpolation=transforms.InterpolationMode.BILINEAR),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225]),
-])
+        # see alex_weights.transforms()
+        preprocess = transforms.Compose([
+            transforms.Resize(256, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225]),
+        ])
 
-layer = 'early, AlexNet(2)'
-print(f"\n---{layer}---")
-all_per_correct = two_way_identification(all_brain_recons.to(device).float(), all_images, 
-                                                          alex_model, preprocess, 'features.4')
-alexnet2 = np.mean(all_per_correct)
-print(f"2-way Percent Correct: {alexnet2:.4f}")
+        layer = 'early, AlexNet(2)'
+        print(f"\n---{layer}---")
+        all_per_correct = two_way_identification(all_brain_recons.to(device).float(), all_images, 
+                                                                alex_model, preprocess, 'features.4')
+        alexnet2 = np.mean(all_per_correct)
+        print(f"2-way Percent Correct: {alexnet2:.4f}")
 
-layer = 'mid, AlexNet(5)'
-print(f"\n---{layer}---")
-all_per_correct = two_way_identification(all_brain_recons.to(device).float(), all_images, 
-                                                          alex_model, preprocess, 'features.11')
-alexnet5 = np.mean(all_per_correct)
-print(f"2-way Percent Correct: {alexnet5:.4f}")
+        layer = 'mid, AlexNet(5)'
+        print(f"\n---{layer}---")
+        all_per_correct = two_way_identification(all_brain_recons.to(device).float(), all_images, 
+                                                                alex_model, preprocess, 'features.11')
+        alexnet5 = np.mean(all_per_correct)
+        print(f"2-way Percent Correct: {alexnet5:.4f}")
 
+        layer = 'late, AlexNet(7)'
+        print(f"\n---{layer}---")
+        all_per_correct = two_way_identification(all_brain_recons.to(device).float(), all_images, 
+                                                                alex_model, preprocess, 'classifier.5')
+        alexnet7 = np.mean(all_per_correct)
+        print(f"2-way Percent Correct: {alexnet7:.4f}")
 
-# ### InceptionV3
 
-# In[13]:
+        # ### InceptionV3
 
+        # In[13]:
 
-from torchvision.models import inception_v3, Inception_V3_Weights
-weights = Inception_V3_Weights.DEFAULT
-inception_model = create_feature_extractor(inception_v3(weights=weights), 
-                                           return_nodes=['avgpool']).to(device)
-inception_model.eval().requires_grad_(False)
 
-# see weights.transforms()
-preprocess = transforms.Compose([
-    transforms.Resize(342, interpolation=transforms.InterpolationMode.BILINEAR),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225]),
-])
+        from torchvision.models import inception_v3, Inception_V3_Weights
+        weights = Inception_V3_Weights.DEFAULT
+        inception_model = create_feature_extractor(inception_v3(weights=weights), 
+                                                return_nodes=['avgpool']).to(device)
+        inception_model.eval().requires_grad_(False)
 
-all_per_correct = two_way_identification(all_brain_recons, all_images,
-                                        inception_model, preprocess, 'avgpool')
-        
-inception = np.mean(all_per_correct)
-print(f"2-way Percent Correct: {inception:.4f}")
+        # see weights.transforms()
+        preprocess = transforms.Compose([
+            transforms.Resize(342, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225]),
+        ])
 
+        all_per_correct = two_way_identification(all_brain_recons, all_images,
+                                                inception_model, preprocess, 'avgpool')
+                
+        inception = np.mean(all_per_correct)
+        print(f"2-way Percent Correct: {inception:.4f}")
 
-# ### CLIP
 
-# In[14]:
+        # ### CLIP
 
+        # In[14]:
 
-import clip
-clip_model, preprocess = clip.load("ViT-L/14", device=device)
 
-preprocess = transforms.Compose([
-    transforms.Resize(224, interpolation=transforms.InterpolationMode.BILINEAR),
-    transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
-                         std=[0.26862954, 0.26130258, 0.27577711]),
-])
+        import clip
+        clip_model, preprocess = clip.load("ViT-L/14", device=device)
 
-all_per_correct = two_way_identification(all_brain_recons, all_images,
-                                        clip_model.encode_image, preprocess, None) # final layer
-clip_ = np.mean(all_per_correct)
-print(f"2-way Percent Correct: {clip_:.4f}")
+        preprocess = transforms.Compose([
+            transforms.Resize(224, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
+                                std=[0.26862954, 0.26130258, 0.27577711]),
+        ])
 
+        all_per_correct = two_way_identification(all_brain_recons, all_images,
+                                                clip_model.encode_image, preprocess, None) # final layer
+        clip_ = np.mean(all_per_correct)
+        print(f"2-way Percent Correct: {clip_:.4f}")
 
-# ### Efficient Net
 
-# In[15]:
+        # ### Efficient Net
 
+        # In[15]:
 
-from torchvision.models import efficientnet_b1, EfficientNet_B1_Weights
-weights = EfficientNet_B1_Weights.DEFAULT
-eff_model = create_feature_extractor(efficientnet_b1(weights=weights), 
-                                    return_nodes=['avgpool']).to(device)
-eff_model.eval().requires_grad_(False)
 
-# see weights.transforms()
-preprocess = transforms.Compose([
-    transforms.Resize(255, interpolation=transforms.InterpolationMode.BILINEAR),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225]),
-])
+        from torchvision.models import efficientnet_b1, EfficientNet_B1_Weights
+        weights = EfficientNet_B1_Weights.DEFAULT
+        eff_model = create_feature_extractor(efficientnet_b1(weights=weights), 
+                                            return_nodes=['avgpool']).to(device)
+        eff_model.eval().requires_grad_(False)
 
-gt = eff_model(preprocess(all_images))['avgpool']
-gt = gt.reshape(len(gt),-1).cpu().numpy()
-fake = eff_model(preprocess(all_brain_recons))['avgpool']
-fake = fake.reshape(len(fake),-1).cpu().numpy()
+        # see weights.transforms()
+        preprocess = transforms.Compose([
+            transforms.Resize(255, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225]),
+        ])
 
-effnet = np.array([sp.spatial.distance.correlation(gt[i],fake[i]) for i in range(len(gt))]).mean()
-print("Distance:",effnet)
+        gt = eff_model(preprocess(all_images))['avgpool']
+        gt = gt.reshape(len(gt),-1).cpu().numpy()
+        fake = eff_model(preprocess(all_brain_recons))['avgpool']
+        fake = fake.reshape(len(fake),-1).cpu().numpy()
 
+        effnet = np.array([sp.spatial.distance.correlation(gt[i],fake[i]) for i in range(len(gt))]).mean()
+        print("Distance:",effnet)
 
-# ### SwAV
 
-# In[16]:
+        # ### SwAV
 
+        # In[16]:
 
-swav_model = torch.hub.load('facebookresearch/swav:main', 'resnet50')
-swav_model = create_feature_extractor(swav_model, 
-                                    return_nodes=['avgpool']).to(device)
-swav_model.eval().requires_grad_(False)
 
-preprocess = transforms.Compose([
-    transforms.Resize(224, interpolation=transforms.InterpolationMode.BILINEAR),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225]),
-])
+        swav_model = torch.hub.load('facebookresearch/swav:main', 'resnet50')
+        swav_model = create_feature_extractor(swav_model, 
+                                            return_nodes=['avgpool']).to(device)
+        swav_model.eval().requires_grad_(False)
 
-gt = swav_model(preprocess(all_images))['avgpool']
-gt = gt.reshape(len(gt),-1).cpu().numpy()
-fake = swav_model(preprocess(all_brain_recons))['avgpool']
-fake = fake.reshape(len(fake),-1).cpu().numpy()
+        preprocess = transforms.Compose([
+            transforms.Resize(224, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225]),
+        ])
 
-swav = np.array([sp.spatial.distance.correlation(gt[i],fake[i]) for i in range(len(gt))]).mean()
-print("Distance:",swav)
+        gt = swav_model(preprocess(all_images))['avgpool']
+        gt = gt.reshape(len(gt),-1).cpu().numpy()
+        fake = swav_model(preprocess(all_brain_recons))['avgpool']
+        fake = fake.reshape(len(fake),-1).cpu().numpy()
 
+        swav = np.array([sp.spatial.distance.correlation(gt[i],fake[i]) for i in range(len(gt))]).mean()
+        print("Distance:",swav)
 
-# # Display in table
 
-# In[34]:
+        # # Display in table
 
+        # In[34]:
 
-# Create a dictionary to store variable names and their corresponding values
-data = {
-    "Metric": ["PixCorr", "SSIM", "AlexNet(2)", "AlexNet(5)", "InceptionV3", "CLIP", "EffNet-B", "SwAV"],
-    "Value": [pixcorr, ssim, alexnet2, alexnet5, inception, clip_, effnet, swav],
-}
 
-df = pd.DataFrame(data)
-print(df.to_string(index=False))
+        # Create a dictionary to store variable names and their corresponding values
+        data = {
+            "Metric": ["PixCorr", "SSIM", "AlexNet(2)", "AlexNet(5)", "AlexNet(7)", "InceptionV3", "CLIP", "EffNet-B", "SwAV"],
+            "Value": [pixcorr, ssim, alexnet2, alexnet5, alexnet7, inception, clip_, effnet, swav],
+        }
+
+        df.loc[df_row_num] = {"PixCorr" : pixcorr, "SSIM" : ssim, "AlexNet(2)" : alexnet2, "AlexNet(5)" : alexnet5, "AlexNet(7)" : alexnet7, "InceptionV3" : inception, "CLIP" : clip_, "EffNet-B" : effnet, "SwAV" : swav}
+        df_row_num += 1
+averages = df.mean()
+
+# Printing averages without column titles
+for avg in averages:
+    print(avg)
 
 if not utils.is_interactive():
     # save table to txt file

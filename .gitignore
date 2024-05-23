@@ -13,3 +13,7 @@
 **/versatile_diffusion/
 src/evals
 src/evals-*
+src/*.png
+/reconstructions_40_sessions
+/seeds_40_sessions
+dataset

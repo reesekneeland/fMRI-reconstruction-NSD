@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[ ]:
+# In[2]:
 
 
 # # Code to convert this notebook to .py if you want to run it via command line or with Slurm
@@ -106,7 +106,7 @@ parser.add_argument(
     help="if not using wandb and want to resume from a ckpt",
 )
 parser.add_argument(
-    "--wandb_project",type=str,default="stability",
+    "--wandb_project",type=str,default="mindeye",
     help="wandb project name",
 )
 parser.add_argument(
@@ -158,12 +158,19 @@ parser.add_argument(
     "--max_lr",type=float,default=3e-4,
 )
 parser.add_argument(
+    "--dropout_rate",type=float,default=0.15,
+)
+parser.add_argument(
     "--n_samples_save",type=int,default=0,choices=[0,1],
     help="Number of reconstructions for monitoring progress, 0 will speed up training",
 )
 parser.add_argument(
     "--use_projector",action=argparse.BooleanOptionalAction,default=True,
     help="Additional MLP after the main MLP so model can separately learn a way to minimize NCE from prior loss (BYOL)",
+)
+parser.add_argument(
+    "--projector_dropout",action=argparse.BooleanOptionalAction,default=False,
+    help="Add dropout layers in the MLP projector for contrastive loss",
 )
 parser.add_argument(
     "--vd_cache_dir", type=str, default='/fsx/proj-medarc/fmri/cache/models--shi-labs--versatile-diffusion/snapshots/2926f8e11ea526b562cd592b099fcf9c2985d0b7',
@@ -282,7 +289,7 @@ elif subj == 7:
     num_voxels = 12682
 elif subj == 8:
     num_voxels = 14386
-voxel2clip_kwargs = dict(in_dim=num_voxels,out_dim=out_dim,clip_size=clip_size,use_projector=use_projector)
+voxel2clip_kwargs = dict(in_dim=num_voxels,out_dim=out_dim,clip_size=clip_size,use_projector=use_projector, dropout_rate=dropout_rate, projector_dropout=projector_dropout)
 voxel2clip = BrainNetwork(**voxel2clip_kwargs)
     
 # load from ckpt
@@ -460,14 +467,16 @@ print("\nDone with model preparations!")
 if local_rank==0 and wandb_log: # only use main process for wandb logging
     import wandb
     
-    wandb_project = 'stability'
+    wandb_project = 'mindeye'
     wandb_run = model_name
     wandb_notes = ''
     
     print(f"wandb {wandb_project} run {wandb_run}")
-    wandb.login(host='https://stability.wandb.io')#, relogin=True)
+    wandb.login()#, relogin=True)
     wandb_config = {
       "model_name": model_name,
+      "dropout_rate" : dropout_rate,
+      "projector_dropout" : projector_dropout,
       "clip_variant": clip_variant,
       "batch_size": batch_size,
       "num_epochs": num_epochs,

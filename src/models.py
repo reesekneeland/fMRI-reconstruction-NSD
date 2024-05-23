@@ -169,7 +169,7 @@ class OpenClipper(torch.nn.Module):
         return clip_emb
     
 class BrainNetwork(nn.Module):
-    def __init__(self, out_dim=768, in_dim=15724, clip_size=768, h=4096, n_blocks=4, norm_type='ln', act_first=False, use_projector=True):
+    def __init__(self, out_dim=768, in_dim=15724, clip_size=768, h=4096, n_blocks=4, norm_type='ln', act_first=False, use_projector=True, dropout_rate=0.15, projector_dropout=False):
         super().__init__()
         norm_func = partial(nn.BatchNorm1d, num_features=h) if norm_type == 'bn' else partial(nn.LayerNorm, normalized_shape=h)
         act_fn = partial(nn.ReLU, inplace=True) if norm_type == 'bn' else nn.GELU
@@ -178,13 +178,13 @@ class BrainNetwork(nn.Module):
         self.lin0 = nn.Sequential(
             nn.Linear(in_dim, h),
             *[item() for item in act_and_norm],
-            nn.Dropout(0.5),
+            nn.Dropout(dropout_rate),
         )
         self.mlp = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(h, h),
                 *[item() for item in act_and_norm],
-                nn.Dropout(0.15)
+                nn.Dropout(dropout_rate)
             ) for _ in range(n_blocks)
         ])
         self.lin1 = nn.Linear(h, out_dim, bias=True)
@@ -193,17 +193,33 @@ class BrainNetwork(nn.Module):
         
         self.use_projector = use_projector
         if use_projector:
-            self.projector = nn.Sequential(
-                nn.LayerNorm(clip_size),
-                nn.GELU(),
-                nn.Linear(clip_size, 2048),
-                nn.LayerNorm(2048),
-                nn.GELU(),
-                nn.Linear(2048, 2048),
-                nn.LayerNorm(2048),
-                nn.GELU(),
-                nn.Linear(2048, clip_size)
-            )
+            if projector_dropout:
+                self.projector = nn.Sequential(
+                    nn.LayerNorm(clip_size),
+                    nn.GELU(),
+                    nn.Dropout(dropout_rate),
+                    nn.Linear(clip_size, 2048),
+                    nn.LayerNorm(2048),
+                    nn.GELU(),
+                    nn.Dropout(dropout_rate),
+                    nn.Linear(2048, 2048),
+                    nn.LayerNorm(2048),
+                    nn.GELU(),
+                    nn.Dropout(dropout_rate),
+                    nn.Linear(2048, clip_size)
+                )
+            else:
+                self.projector = nn.Sequential(
+                    nn.LayerNorm(clip_size),
+                    nn.GELU(),
+                    nn.Linear(clip_size, 2048),
+                    nn.LayerNorm(2048),
+                    nn.GELU(),
+                    nn.Linear(2048, 2048),
+                    nn.LayerNorm(2048),
+                    nn.GELU(),
+                    nn.Linear(2048, clip_size)
+                )
         
     def forward(self, x):
         '''

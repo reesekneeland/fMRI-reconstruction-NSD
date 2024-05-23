@@ -14,7 +14,7 @@
 
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = "3"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "1"
 import sys
 import json
 import numpy as np
@@ -28,7 +28,7 @@ import webdataset as wds
 import PIL
 import argparse
 from random import randrange
-
+import time
 
 
 import utils
@@ -38,7 +38,7 @@ if utils.is_interactive():
     get_ipython().run_line_magic('load_ext', 'autoreload')
     get_ipython().run_line_magic('autoreload', '2')
 
-seed=randrange(1000)
+seed=randrange(100000)
 utils.seed_everything(seed=seed)
 
 
@@ -92,6 +92,25 @@ parser.add_argument(
 parser.add_argument(
     "--rep", type=int, default=1,
 )
+parser.add_argument(
+    "--mode", type=str, default="vision",
+    help="modality of reconstruction, either vision or imagery",
+)
+parser.add_argument(
+    "--stimtype", type=str, default="all",
+    help="stimulus type of reconstruction, either simple, complex, or concepts",
+)
+parser.add_argument(
+    "--epoch", type=int, default=0,
+    help="epoch of attention reconstruction, either 0 (cue period) or 1 (barrage period)",
+)
+parser.add_argument(
+    "--average", type=str, default="True",
+    help="Whether to average betas for a stimulus, if disabled, will reconstruct each beta individually",
+)
+parser.add_argument(
+    "--dropout_rate",type=float,default=0.15,
+)
 
 
 if utils.is_interactive():
@@ -111,6 +130,11 @@ data_path = args.data_path
 vd_cache_dir = args.vd_cache_dir
 recons_per_sample = args.recons_per_sample
 rep = args.rep
+mode = args.mode
+stimtype = args.stimtype
+epoch = args.epoch
+average = args.average == "True"
+print(average)
 # In[4]:
 
 device = torch.device(f'cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -136,28 +160,29 @@ print("subj",subj,"num_voxels",num_voxels)
 
 
 # In[5]:
-utils.download_test_data(data_path, subj)
 
-val_url = f"{data_path}/webdataset_avg_split/test/test_subj0{subj}_" + "{0..1}.tar"
-meta_url = f"{data_path}/webdataset_avg_split/metadata_subj0{subj}.json"
-num_val = 1000
+
+# val_url = f"{data_path}/webdataset_avg_split/test/test_subj0{subj}_" + "{0..1}.tar"
+# meta_url = f"{data_path}/webdataset_avg_split/metadata_subj0{subj}.json"
+# num_train = 8559 + 300
+# num_val = 982
 batch_size = val_batch_size = 1
-voxels_key = 'nsdgeneral.npy' # 1d inputs
+# voxels_key = 'nsdgeneral.npy' # 1d inputs
 
-val_data = wds.WebDataset(val_url, resampled=False)\
-    .decode("torch")\
-    .rename(images="jpg;png", voxels=voxels_key, trial="trial.npy", coco="coco73k.npy", reps="num_uniques.npy")\
-    .to_tuple("voxels", "images", "coco")\
-    .batched(val_batch_size, partial=False)
+# val_data = wds.WebDataset(val_url, resampled=False)\
+#     .decode("torch")\
+#     .rename(images="jpg;png", voxels=voxels_key, trial="trial.npy", coco="coco73k.npy", reps="num_uniques.npy")\
+#     .to_tuple("voxels", "images", "coco")\
+#     .batched(val_batch_size, partial=False)
 
-val_dl = torch.utils.data.DataLoader(val_data, batch_size=None, shuffle=False)
+# val_dl = torch.utils.data.DataLoader(val_data, batch_size=None, shuffle=False)
 
-# check that your data loader is working
-for val_i, (voxel, img_input, coco) in enumerate(val_dl):
-    print("idx",val_i)
-    print("voxel.shape",voxel.shape)
-    print("img_input.shape",img_input.shape)
-    break
+# # check that your data loader is working
+# for val_i, (voxel, img_input, coco) in enumerate(val_dl):
+#     print("idx",val_i)
+#     print("voxel.shape",voxel.shape)
+#     print("img_input.shape",img_input.shape)
+#     break
 
 
 # ## Load autoencoder
@@ -235,7 +260,7 @@ img_variations = False
 
 out_dim = 257 * 768
 clip_extractor = Clipper("ViT-L/14", hidden_state=True, norm_embs=True, device=device)
-voxel2clip_kwargs = dict(in_dim=num_voxels,out_dim=out_dim)
+voxel2clip_kwargs = dict(in_dim=num_voxels,out_dim=out_dim, dropout_rate=dropout_rate)
 voxel2clip = BrainNetwork(**voxel2clip_kwargs)
 voxel2clip.requires_grad_(False)
 voxel2clip.eval()
@@ -269,7 +294,8 @@ outdir = f'/home/naxos2-raid25/kneel027/home/kneel027/fMRI-reconstruction-NSD/tr
 ckpt_path = os.path.join(outdir, f'last.pth')
 
 print("ckpt_path",ckpt_path)
-checkpoint = torch.load(ckpt_path, map_location=device)
+checkpoint = torch.load(ckpt_path)#, map_location=device)
+
 state_dict = checkpoint['model_state_dict']
 print("EPOCH: ",checkpoint['epoch'])
 diffusion_prior.load_state_dict(state_dict,strict=False)
@@ -355,9 +381,9 @@ if img_variations:
 else:
     guidance_scale = 3.5
     
-ind_include = np.arange(num_val)
+# ind_include = np.arange(num_val)
 all_brain_recons = None
-mode = "nsd_vision"
+    
 only_lowlevel = False
 if img2img_strength == 1:
     img2img = False
@@ -366,89 +392,137 @@ elif img2img_strength == 0:
     only_lowlevel = True
 else:
     img2img = True
-    
-for val_i, (voxel, img, coco) in enumerate(tqdm(val_dl,total=len(ind_include))):
-    if val_i<np.min(ind_include):
-        continue
-    voxel = torch.mean(voxel,axis=1).to(device)
-    # voxel = voxel[:,0].to(device)
-    
-    with torch.no_grad():
-        if img2img:
-            ae_preds = voxel2sd(voxel.float())
-            blurry_recons = vd_pipe.vae.decode(ae_preds.to(device).half()/0.18215).sample / 2 + 0.5
 
-            if val_i==0:
-                plt.imshow(utils.torch_to_Image(blurry_recons))
-                plt.show()
-        else:
-            blurry_recons = None
+# experiment_type = "mi_imagery"
+# experiment_type = "mi_vision"
+# experiment_type = "nsd_vision"
 
-        if only_lowlevel:
-            brain_recons = blurry_recons
-        else:
-            os.makedirs("../reconstructions_40_sessions/{}/subject{}/{}/".format(mode, subj, val_i), exist_ok=True)
-            os.makedirs("../seeds_40_sessions/{}/subject{}/{}/".format(mode, subj, val_i), exist_ok=True)
-            os.makedirs("/home/naxos2-raid25/kneel027/home/kneel027/Second-Sight/output/second_sight_paper/mindeye/subject{}/{}/".format(subj, val_i), exist_ok=True)
-            grid, brain_recons, laion_best_picks, recon_img, extracted_clips = utils.reconstruction(
-                img, voxel,
-                clip_extractor, unet, vae, noise_scheduler,
-                voxel2clip_cls = None, #diffusion_prior_cls.voxel2clip,
-                diffusion_priors = diffusion_priors,
-                text_token = None,
-                img_lowlevel = blurry_recons,
-                num_inference_steps = num_inference_steps,
-                n_samples_save = batch_size,
-                recons_per_sample = recons_per_sample,
-                guidance_scale = guidance_scale,
-                img2img_strength = img2img_strength, # 0=fully rely on img_lowlevel, 1=not doing img2img
-                timesteps_prior = 100,
-                seed = seed,
-                retrieve = retrieve,
-                plotting = plotting,
-                img_variations = img_variations,
-                verbose = verbose,
-            )
+gt_images = "/home/naxos2-raid25/kneel027/home/kneel027/Second-Sight/data/nsddata_stimuli/stimuli/imagery_images/"
 
-            if plotting:
-                plt.show()
-                # grid.savefig(f'evals/{model_name}_{val_i}.png')
+for mode in ["imagery", "vision"]:
 
-            brain_recons = brain_recons[:,laion_best_picks.astype(np.int8)]
-            # resized_img = transforms.Resize((512,512))(brain_recons)
-            pil_rec = transforms.ToPILImage()(brain_recons[0, 0, :, :, :])
-            # print(brain_recons)
-            # pil_im = PIL.Image.fromarray((brain_recons.reshape(512, 512, 3).cpu().numpy() * 255).astype(np.uint8))
-            # pil_rec.save("/home/naxos2-raid25/kneel027/home/kneel027/Second-Sight/output/second_sight_paper/mindeye/subject{}/{}/{}.png".format(subj, val_i, rep))
-            pil_rec.save("../reconstructions_40_sessions/{}/subject{}/{}/{}.png".format(mode, subj, val_i, rep))
-            # print(img.shape)
-            # pil_im = PIL.Image.open(gt_images + "{}.png".format(val_i)).resize((512, 512))
-            pil_im = transforms.ToPILImage()(img[0, :, :, :])
-            pil_im.save("../reconstructions_40_sessions/{}/subject{}/{}/ground_truth.png".format(mode, subj, val_i))
-            # print(blurry_recons.shape)o
-            pil_low_level = transforms.ToPILImage()(blurry_recons[0, :, :, :])
-            pil_low_level.save("../reconstructions_40_sessions/{}/subject{}/{}/low_level.png".format(mode, subj, val_i))
-            pil_low_level.save("../seeds_40_sessions/{}/subject{}/{}/low_level.png".format(mode, subj, val_i))
-            # torch.save(extracted_clips, "../seeds/{}/subject{}/{}/clip_block.pt".format(experiment_type, subj, val_i))
-            torch.save(extracted_clips[laion_best_picks.astype(np.int8)].reshape((257, 768)), "../seeds_40_sessions/{}/subject{}/{}/clip_best.pt".format(mode, subj, val_i))
+    voxels, images = utils.load_nsd_mental_imagery(subject=subj, mode=mode, stimtype=stimtype, average=average, nest=False)
 
-        if all_brain_recons is None:
-            all_brain_recons = brain_recons
-            all_images = img
-        else:
-            all_brain_recons = torch.vstack((all_brain_recons,brain_recons))
-            all_images = torch.vstack((all_images,img))
+    for val_i, (voxel, img) in enumerate(tqdm(zip(voxels.to(device), images.to(device)))):
+        # if val_i<np.min(ind_include):
+        #     continue
+        # voxel = torch.mean(voxel,axis=1).to(device)
+        # voxel = voxel[:,0].to(device)
+        # print("VOXEL SHAPE", voxel.shape)
+        with torch.no_grad():
+            if img2img:
+                ae_preds = voxel2sd(voxel.float())
+                blurry_recons = vd_pipe.vae.decode(ae_preds.to(device).half()/0.18215).sample / 2 + 0.5
+
+                if val_i==0:
+                    plt.imshow(utils.torch_to_Image(blurry_recons))
+                    plt.show()
+            else:
+                blurry_recons = None
+
+            if only_lowlevel:
+                brain_recons = blurry_recons
+            else:
+                # os.makedirs("../reconstructions/{}/subject{}/{}/".format(mode, subj, val_i), exist_ok=True)
+                # os.makedirs("../seeds/{}/subject{}/{}/".format(mode, subj, val_i), exist_ok=True)
+                grid, brain_recons, laion_best_picks, recon_img, extracted_clips = utils.reconstruction(
+                    img, voxel,
+                    clip_extractor, unet, vae, noise_scheduler,
+                    voxel2clip_cls = None, #diffusion_prior_cls.voxel2clip,
+                    diffusion_priors = diffusion_priors,
+                    text_token = None,
+                    img_lowlevel = blurry_recons,
+                    num_inference_steps = num_inference_steps,
+                    n_samples_save = batch_size,
+                    recons_per_sample = recons_per_sample,
+                    guidance_scale = guidance_scale,
+                    img2img_strength = img2img_strength, # 0=fully rely on img_lowlevel, 1=not doing img2img
+                    timesteps_prior = 100,
+                    seed = seed,
+                    retrieve = retrieve,
+                    plotting = plotting,
+                    img_variations = img_variations,
+                    verbose = verbose,
+                )
+
+                if plotting:
+                    plt.show()
+                    # grid.savefig(f'evals/{model_name}_{val_i}.png')
+                # if stimtype == "concepts":
+                #     val_i = val_i + 12
+                #     os.makedirs("/home/naxos2-raid25/kneel027/home/kneel027/Second-Sight/output/mental_imagery_paper_b3/{}/mindeye/subject{}/{}/".format(mode, subj, val_i), exist_ok=True)
+                #     with open("/home/naxos2-raid25/kneel027/home/kneel027/Second-Sight/output/mental_imagery_paper_b3/{}/mindeye/subject{}/{}/ground_truth.txt".format(mode, subj, val_i), 'w') as file:
+                #         file.write(stimulus[val_i-12])
+                # os.makedirs("/home/naxos2-raid25/kneel027/home/kneel027/Second-Sight/output/mental_imagery_paper_b3/{}/mindeye/subject{}/{}/".format(mode, subj, val_i, ), exist_ok=True)
+                brain_recons = brain_recons[:,laion_best_picks.astype(np.int8)]
+                # resized_img = transforms.Resize((512,512))(brain_recons)
+                pil_rec = transforms.ToPILImage()(brain_recons[0, 0, :, :, :])
+                
+                
+                rec_path = "/home/naxos2-raid25/kneel027/home/kneel027/Second-Sight/output/mental_imagery_paper_b3/{}/mindeye_{}/subject{}/{}/".format(mode, model_name, subj, val_i)
+                    # seed_path = "../seeds/mi_{}/subject{}/{}/".format(mode, subj, val_i)
+                os.makedirs(rec_path, exist_ok=True)
+                # os.makedirs(seed_path, exist_ok=True)
+                pil_rec.save(f"{rec_path}{rep}.png")
+                # pil_rec.save("../reconstructions/{}/subject{}/{}/mindeye.png".format(experiment_type, subj, val_i))
+                # print(img.shape)
+                pil_gt = PIL.Image.open(gt_images + "{}.png".format(val_i)).resize((512, 512))
+                pil_gt.save(f"{rec_path}ground_truth.png")
+                
+                # print(blurry_recons.shape)
+                
+                pil_low_level = transforms.ToPILImage()(blurry_recons[0, :, :, :])
+                pil_low_level.save(f"{rec_path}low_level.png")
+                # pil_low_level.save(f"{seed_path}low_level.png")
+                torch.save(extracted_clips, f"{rec_path}clip_block.pt")
+                torch.save(extracted_clips[laion_best_picks.astype(np.int8)].reshape((257, 768)), f"{rec_path}clip_best.pt")
+                
+                if mode == "attention":
+                    barrage_id = 0
+                    barrage_stim_id = 0
+                    stim = stimulus[val_i]
+                    if isinstance(stim, list):
+                        for i, substim in enumerate(stim):
+                            substim["stimulus"].save(f"{rec_path}/ground_truth.png")
+                            os.makedirs(f"{rec_path}{i}/", exist_ok=True)
+                            for barr in substim["barrage"]:
+                                barr.save(f"{rec_path}{i}/barrage_{barrage_id}.png")
+                                barrage_id += 1
+                            for barr_stim in substim["barrage_stim"]:
+                                barr_stim.save(f"{rec_path}{i}/barrage_stim_{barrage_stim_id}.png")
+                                barrage_stim_id += 1
+                                
+                            with open(f"{rec_path}{i}/stim_present.txt", 'w') as file:
+                                file.write(str(substim["stim_present"]))
+                    else:
+                        stim["stimulus"].save(f"{rec_path}/ground_truth.png")
+                        for barr in stim["barrage"]:
+                            barr.save(f"{rec_path}/barrage_{barrage_id}.png")
+                            barrage_id += 1
+                        for barr_stim in stim["barrage_stim"]:
+                            barr_stim.save(f"{rec_path}/barrage_stim_{barrage_stim_id}.png")
+                            barrage_stim_id += 1
+                            
+                        with open(f"{rec_path}stim_present.txt", 'w') as file:
+                            file.write(str(stim["stim_present"]))
+                    
+
+            if all_brain_recons is None:
+                all_brain_recons = brain_recons
+                all_images = img
+            else:
+                all_brain_recons = torch.vstack((all_brain_recons,brain_recons))
+                all_images = torch.vstack((all_images,img))
 
     # if val_i>=np.max(ind_include):
     #     break
 
-all_brain_recons = all_brain_recons.view(-1,3,imsize,imsize)
-print(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+# all_brain_recons = all_brain_recons.view(-1,3,imsize,imsize)
+# print(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
-if saving:
-    torch.save(all_images,f'all_images.pt')
-    torch.save(all_brain_recons,f'{model_name}_recons_img2img{img2img_strength}_{recons_per_sample}samples.pt')
-print(f'recon_path: {model_name}_recons_img2img{img2img_strength}_{recons_per_sample}samples')
+# if saving:
+#     torch.save(all_images,f'all_images.pt')
+#     torch.save(all_brain_recons,f'{model_name}_recons_img2img{img2img_strength}_{recons_per_sample}samples.pt')
+# print(f'recon_path: {model_name}_recons_img2img{img2img_strength}_{recons_per_sample}samples')
 
-if not utils.is_interactive():
-    sys.exit(0)
+time.sleep(10)

@@ -12,9 +12,9 @@
 
 # In[2]:
 
-
+print("In!")
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = "3"
+os.environ['CUDA_VISIBLE_DEVICES'] = "2"
 import sys
 import json
 import numpy as np
@@ -140,7 +140,8 @@ utils.download_test_data(data_path, subj)
 
 val_url = f"{data_path}/webdataset_avg_split/test/test_subj0{subj}_" + "{0..1}.tar"
 meta_url = f"{data_path}/webdataset_avg_split/metadata_subj0{subj}.json"
-num_val = 1000
+num_train = 8559 + 300
+num_val = 982
 batch_size = val_batch_size = 1
 voxels_key = 'nsdgeneral.npy' # 1d inputs
 
@@ -357,7 +358,7 @@ else:
     
 ind_include = np.arange(num_val)
 all_brain_recons = None
-mode = "nsd_vision"
+    
 only_lowlevel = False
 if img2img_strength == 1:
     img2img = False
@@ -387,8 +388,8 @@ for val_i, (voxel, img, coco) in enumerate(tqdm(val_dl,total=len(ind_include))):
         if only_lowlevel:
             brain_recons = blurry_recons
         else:
-            os.makedirs("../reconstructions_40_sessions/{}/subject{}/{}/".format(mode, subj, val_i), exist_ok=True)
-            os.makedirs("../seeds_40_sessions/{}/subject{}/{}/".format(mode, subj, val_i), exist_ok=True)
+            # os.makedirs("../reconstructions/{}/subject{}/{}/".format(mode, subj, val_i), exist_ok=True)
+            # os.makedirs("../seeds/{}/subject{}/{}/".format(mode, subj, val_i), exist_ok=True)
             os.makedirs("/home/naxos2-raid25/kneel027/home/kneel027/Second-Sight/output/second_sight_paper/mindeye/subject{}/{}/".format(subj, val_i), exist_ok=True)
             grid, brain_recons, laion_best_picks, recon_img, extracted_clips = utils.reconstruction(
                 img, voxel,
@@ -419,18 +420,17 @@ for val_i, (voxel, img, coco) in enumerate(tqdm(val_dl,total=len(ind_include))):
             pil_rec = transforms.ToPILImage()(brain_recons[0, 0, :, :, :])
             # print(brain_recons)
             # pil_im = PIL.Image.fromarray((brain_recons.reshape(512, 512, 3).cpu().numpy() * 255).astype(np.uint8))
-            # pil_rec.save("/home/naxos2-raid25/kneel027/home/kneel027/Second-Sight/output/second_sight_paper/mindeye/subject{}/{}/{}.png".format(subj, val_i, rep))
-            pil_rec.save("../reconstructions_40_sessions/{}/subject{}/{}/{}.png".format(mode, subj, val_i, rep))
+            pil_rec.save("/home/naxos2-raid25/kneel027/home/kneel027/Second-Sight/output/second_sight_paper/mindeye/subject{}/{}/{}.png".format(subj, val_i, rep))
+            # pil_rec.save("../reconstructions/{}/subject{}/{}/mindeye.png".format(experiment_type, subj, val_i))
             # print(img.shape)
             # pil_im = PIL.Image.open(gt_images + "{}.png".format(val_i)).resize((512, 512))
-            pil_im = transforms.ToPILImage()(img[0, :, :, :])
-            pil_im.save("../reconstructions_40_sessions/{}/subject{}/{}/ground_truth.png".format(mode, subj, val_i))
-            # print(blurry_recons.shape)o
-            pil_low_level = transforms.ToPILImage()(blurry_recons[0, :, :, :])
-            pil_low_level.save("../reconstructions_40_sessions/{}/subject{}/{}/low_level.png".format(mode, subj, val_i))
-            pil_low_level.save("../seeds_40_sessions/{}/subject{}/{}/low_level.png".format(mode, subj, val_i))
+            # pil_im.save("../reconstructions/{}/subject{}/{}/ground_truth.png".format(experiment_type, subj, val_i))
+            # print(blurry_recons.shape)
+            # pil_low_level = transforms.ToPILImage()(blurry_recons[0, :, :, :])
+            # pil_low_level.save("../reconstructions/{}/subject{}/{}/low_level.png".format(experiment_type, subj, val_i))
+            # pil_low_level.save("../seeds/{}/subject{}/{}/low_level.png".format(experiment_type, subj, val_i))
             # torch.save(extracted_clips, "../seeds/{}/subject{}/{}/clip_block.pt".format(experiment_type, subj, val_i))
-            torch.save(extracted_clips[laion_best_picks.astype(np.int8)].reshape((257, 768)), "../seeds_40_sessions/{}/subject{}/{}/clip_best.pt".format(mode, subj, val_i))
+            # torch.save(extracted_clips[laion_best_picks.astype(np.int8)].reshape((257, 768)), "../seeds/{}/subject{}/{}/clip_best.pt".format(experiment_type, subj, val_i))
 
         if all_brain_recons is None:
             all_brain_recons = brain_recons
