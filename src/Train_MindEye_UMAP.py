@@ -70,7 +70,7 @@ if utils.is_interactive():
     get_ipython().run_line_magic('autoreload', '2 # this allows you to change functions in models.py or utils.py and have this notebook automatically update with your revisions')
 
 
-# In[4]:
+# In[ ]:
 
 
 parser = argparse.ArgumentParser(description="Model Training Configuration")
@@ -181,9 +181,30 @@ parser.add_argument(
     help="Use UMAP to do dimensionality reduction prior to training",
 )
 parser.add_argument(
-    "--num_dimensions", type=int, default=2,
+    "--dimensions", type=int, default=4096,
     help="Number of UMAP dimensions to map to",
 )
+parser.add_argument(
+    "--min_dist", type=float, default=0.1,
+    help="Minimum allowed distance in UMAP space",
+)
+parser.add_argument(
+    "--metric", type=str, default="cosine",
+    help="UMAP alignment metric",
+)
+parser.add_argument(
+    "--n_neighbors", type=int, default=4096,
+    help="Number of UMAP nearest neighbors to consider for alignment",
+)
+parser.add_argument(
+    "--supervised",action=argparse.BooleanOptionalAction,default=False,
+    help="Use CLIP embeddings to align UMAP embeddings",
+)
+parser.add_argument(
+    "--umap_hidden",action=argparse.BooleanOptionalAction,default=True,
+    help="Use last hidden layer CLIP embeddings to align UMAP embeddings",
+)
+
 
 if utils.is_interactive():
     args = parser.parse_args(jupyter_args)
@@ -230,6 +251,20 @@ if use_image_aug:
 
 # In[6]:
 
+
+if reduce_dim:
+    print(f"GPU memory used 1: {torch.cuda.memory_allocated()} bytes")
+    umap_reducer = utils.get_umap(
+        subj=subj,
+        metric=metric, #correlation
+        n_neighbors=n_neighbors,
+        seed=42,
+        dimensions=dimensions,
+        min_dist=min_dist,
+        supervised=supervised,
+        hidden=umap_hidden,
+        device=device)
+    print(f"GPU memory used 2: {torch.cuda.memory_allocated()} bytes")
 
 print('Pulling NSD webdataset data...')
 
@@ -281,22 +316,24 @@ else:
 print("out_dim:",out_dim)
 
 print('Creating voxel2clip...')
-if subj == 1:
-    num_voxels = 15724
-elif subj == 2:
-    num_voxels = 14278
-elif subj == 3:
-    num_voxels = 15226
-elif subj == 4:
-    num_voxels = 13153
-elif subj == 5:
-    num_voxels = 13039
-elif subj == 6:
-    num_voxels = 17907
-elif subj == 7:
-    num_voxels = 12682
-elif subj == 8:
-    num_voxels = 14386
+# if subj == 1:
+#     num_voxels = 15724
+# elif subj == 2:
+#     num_voxels = 14278
+# elif subj == 3:
+#     num_voxels = 15226
+# elif subj == 4:
+#     num_voxels = 13153
+# elif subj == 5:
+#     num_voxels = 13039
+# elif subj == 6:
+#     num_voxels = 17907
+# elif subj == 7:
+#     num_voxels = 12682
+# elif subj == 8:
+#     num_voxels = 14386
+
+num_voxels = dimensions
 voxel2clip_kwargs = dict(in_dim=num_voxels,out_dim=out_dim,clip_size=clip_size,use_projector=use_projector, dropout_rate=dropout_rate, projector_dropout=projector_dropout)
 voxel2clip = BrainNetwork(**voxel2clip_kwargs)
     
@@ -485,6 +522,13 @@ if local_rank==0 and wandb_log: # only use main process for wandb logging
       "model_name": model_name,
       "dropout_rate" : dropout_rate,
       "projector_dropout" : projector_dropout,
+      "reduce_dim" : reduce_dim,
+      "metric": metric,
+      "n_neighbors": n_neighbors,
+      "dimensions": dimensions,
+      "min_dist": min_dist,
+      "supervised": supervised,
+      "hidden": umap_hidden,
       "clip_variant": clip_variant,
       "batch_size": batch_size,
       "num_epochs": num_epochs,
@@ -600,7 +644,10 @@ for epoch in progress_bar:
     val_loss_prior_sum = 0.
 
     for train_i, (voxel, image, coco) in enumerate(train_dl):
-        print(image.shape, voxel.shape)
+        # image = image.view((image.shape[0], 3, 425, 425))
+        # image = F.interpolate(image, size=(224, 224), mode='bilinear', align_corners=False)
+        
+        
         with torch.cuda.amp.autocast():
             optimizer.zero_grad()
 
@@ -612,7 +659,8 @@ for epoch in progress_bar:
                 # plt.show()
 
             voxel = voxel[:,repeat_index].float()
-            print(image.shape, voxel.shape)
+            if reduce_dim:
+                voxel = torch.from_numpy(umap.transform(voxel.cpu().numpy())).to(device)
 
             if epoch < int(mixup_pct * num_epochs):
                 voxel, perm, betas, select = utils.mixco(voxel)

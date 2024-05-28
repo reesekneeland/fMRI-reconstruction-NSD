@@ -21,6 +21,8 @@ import time
 import braceexpand
 from models import Clipper,OpenClipper
 import pickle
+import umap
+from tqdm import tqdm
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -1187,3 +1189,238 @@ def enable_dropout(model):
     for module in model.modules():
         if isinstance(module, torch.nn.Dropout):
             module.train()
+            
+# Main data loader, 
+# vector: required parameter for the type of vector you want to load, options are: "c", "images", "z_vdvae"
+# subject: required parameter for which subjects data to load, options are: 1, 2, 5, 7
+# loader: flag to return dataloaders instead of raw data tensors
+# ae: flag to return data used for training the autoencoder
+# encoderModel: if ae flag is enabled, this is a required parameter specifying which encoding model's predictions to use for the autoencoder target
+# average: flag to determine whether the brain data is averaged across the trial repetitions
+# nest: if loader is False, changes the shape of the data structure to keep sample repetitions together
+# batch_size: only used if loader is True, determines dataloader batch size
+# num_workers: only used if loader is True, determines num_workers for dataloader
+def load_nsd(subject, average=False, nest=False, normalized=True, data_root="/export/raid1/home/kneel027/Second-Sight/data/"):
+    if normalized:
+        beta_file = f"{data_root}/preprocessed_data/subject{subject}/nsd_general_large.pt"
+    else:
+        beta_file = f"{data_root}/preprocessed_data/subject{subject}/nsd_general_unnormalized_large.pt"
+    x = torch.load(beta_file).requires_grad_(False).to("cpu")
+    y = torch.load(f"{data_root}/preprocessed_data/subject{subject}/images_tensor.pt").requires_grad_(False).to("cpu")
+    x_train, x_test = [], []
+    y_train, y_test = [], []
+    # Preparing dataframe to help separate the shared1000 test data
+    stim_descriptions = pd.read_csv(f'{data_root}/nsddata/experiments/nsd/nsd_stim_info_merged.csv', index_col=0)
+    subj_train = stim_descriptions[(stim_descriptions['subject{}'.format(subject)] != 0) & (stim_descriptions['shared1000'] == False)]
+    subj_test = stim_descriptions[(stim_descriptions['subject{}'.format(subject)] != 0) & (stim_descriptions['shared1000'] == True)]
+    pbar = tqdm(desc="loading samples", total=x.shape[0])
+    for i in range(subj_train.shape[0]):
+        nsdId = subj_train.iloc[i]['nsdId']
+        avx = []
+        avy = []
+        x_row = torch.zeros((3, x.shape[1]))
+        for j in range(3):
+            scanId = subj_train.iloc[i]['subject{}_rep{}'.format(subject, j)] - 1
+            if(scanId < x.shape[0]):
+                if average or nest:
+                    avx.append(x[scanId])
+                    avy.append(y[scanId])
+                else:
+                    x_train.append(x[scanId])
+                    y_train.append(y[scanId])
+                pbar.update() 
+        # Setup nested or averaged data structure if flags are passed
+        if(len(avy)>0):
+            if average:
+                avx = torch.stack(avx)
+                x_train.append(torch.mean(avx, dim=0))
+            else:
+                for j in range(len(avx)):
+                    x_row[j] = avx[j]
+                x_train.append(x_row)
+            y_train.append(avy[0])
+    # Collect test data
+    for i in range(subj_test.shape[0]):
+        nsdId = subj_test.iloc[i]['nsdId']
+        avx = []
+        avy = []
+        x_row = torch.zeros((3, x.shape[1]))
+        for j in range(3):
+            scanId = subj_test.iloc[i]['subject{}_rep{}'.format(subject, j)] - 1
+            if(scanId < x.shape[0]):
+                if average or nest:
+                    avx.append(x[scanId])
+                    avy.append(y[scanId])
+                else:
+                    x_test.append(x[scanId])
+                    y_test.append(y[scanId])
+                pbar.update() 
+        # Setup nested or averaged data structure if flags are passed
+        if(len(avy)>0):
+            if average:
+                avx = torch.stack(avx)
+                x_test.append(torch.mean(avx, dim=0))
+                
+            else:
+                for j in range(len(avx)):
+                    x_row[j] = avx[j]
+                x_test.append(x_row)
+            y_test.append(avy[0])
+    # Concatenate data into tensors
+    x_train = torch.stack(x_train).to("cpu")
+    x_test = torch.stack(x_test).to("cpu")
+    y_train = torch.stack(y_train).to("cpu")
+    y_test = torch.stack(y_test).to("cpu")
+        
+    tqdm.write("Data Shapes... x_train: {}, x_test: {}, y_train: {}, y_test: {}".format(x_train.shape, x_test.shape, y_train.shape, y_test.shape))
+    
+    return x_train, x_test, y_train, y_test
+
+def get_dataloaders_umap(
+    batch_size=32,
+    num_workers=None,
+    subj=1,
+    metric="cosine", #correlation
+    n_neighbors=5,
+    seed=42,
+    dimensions=10,
+    min_dist=0.1,
+    supervised=False,
+    hidden=True,
+    device="cuda",
+    train_logs_path = "../train_logs",
+    ):
+    print("Loading NSD Files...")
+    x_train, x_test, y_train, y_test = load_nsd(subject=subj, nest=True)
+    num_train = len(x_train)
+    num_test = len(x_test)
+    x_train_shape = x_train.shape
+    x_test_shape = x_test.shape
+    x_train = x_train.reshape(((x_train.shape[0] * x_train.shape[1]), x_train.shape[2]))
+    x_test = x_test.reshape(((x_test.shape[0] * x_test.shape[1]), x_test.shape[2]))
+    
+    umap_filename = f"{train_logs_path}/umap_subj0{subj}_{dimensions}dim_{metric}_{n_neighbors}neighbors_{min_dist}dist"
+    if supervised:
+        umap_filename += f"_supervised{'_hidden' if hidden else ''}"
+        clip_extractor = Clipper("ViT-L/14", device=device, hidden_state=hidden, norm_embs=hidden)
+        emb = None
+        with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.float16):
+            for batch in tqdm(range(0,len(y_train),128)):
+                image_batch = y_train[batch:batch+128].to(device)
+
+                emb0 = clip_extractor.embed_image(image_batch).float()
+                emb0 = nn.functional.normalize(emb0.flatten(1),dim=-1)
+                
+                if emb is None:
+                    emb = emb0.to('cpu')
+                else:
+                    emb = torch.vstack((emb, emb0.to('cpu')))
+        
+    if os.path.exists(umap_filename):
+        print(f"Loading UMAP model from file: {umap_filename}")
+        reducer = pickle.load((open(umap_filename, 'rb')))
+    else:
+        print("Specified UMAP model does not exist yet, creating one...")
+        starttime = time.time()
+        reducer = umap.UMAP(
+                        n_neighbors=n_neighbors,
+                        random_state=seed, 
+                        n_components=dimensions, 
+                        metric=metric,
+                        min_dist=min_dist)
+        if supervised:
+            reducer = reducer.fit(x_train, emb)
+        else:
+            reducer = reducer.fit(x_train)
+        print(f"UMAP fitted, took {time.time() - starttime:.2f}s")
+        print(f"Saving UMAP model to file: {umap_filename}")
+        pickle.dump(reducer, open(umap_filename, 'wb'))
+    
+    print("Transforming data...")
+    x_train = torch.from_numpy(reducer.transform(x_train))
+    x_test = torch.from_numpy(reducer.transform(x_test))
+    x_train_shape = x_train.shape
+    x_test_shape = x_test.shape
+    
+    print("New data dims: ", x_train.shape, y_train.shape, x_test.shape, y_test.shape)
+    x_train = x_train.reshape((int(x_train.shape[0] / 3), 3, x_train.shape[1]))
+    x_test = x_test.reshape((int(x_test.shape[0] / 3), 3, x_test.shape[1]))
+    
+    print("New new data dims: ", x_train.shape, y_train.shape, x_test.shape, y_test.shape)
+    
+    print("Getting dataloaders...")
+    trainset = torch.utils.data.TensorDataset(x_train, y_train)
+    testset = torch.utils.data.TensorDataset(x_test, y_test)
+    # Loads the Dataset into a DataLoader
+    train_dl = torch.utils.data.DataLoader(trainset, batch_size=batch_size, num_workers=num_workers, shuffle=True)
+    test_dl = torch.utils.data.DataLoader(testset, batch_size=batch_size, num_workers=num_workers, shuffle=False)
+
+    return train_dl, test_dl, num_train, num_test
+
+def get_umap(
+    subj=1,
+    metric="cosine", #correlation
+    n_neighbors=5,
+    seed=42,
+    dimensions=10,
+    min_dist=0.1,
+    supervised=False,
+    hidden=True,
+    device="cuda",
+    train_logs_path = "../train_logs",
+    ):
+    
+    umap_filename = f"{train_logs_path}/umap_subj0{subj}_{dimensions}dim_{metric}_{n_neighbors}neighbors_{min_dist}dist"
+    if supervised:
+        umap_filename += f"_supervised{'_hidden' if hidden else ''}"
+        
+    if os.path.exists(umap_filename):
+        print(f"Loading UMAP model from file: {umap_filename}")
+        reducer = pickle.load((open(umap_filename, 'rb')))
+    else:
+        print(f"Specified UMAP model does not exist yet, creating {umap_filename}")
+        print("Loading NSD Files...")
+        x_train, x_test, y_train, y_test = load_nsd(subject=subj, nest=True)
+        x_train = x_train.reshape(((x_train.shape[0] * x_train.shape[1]), x_train.shape[2]))
+        x_test = x_test.reshape(((x_test.shape[0] * x_test.shape[1]), x_test.shape[2]))
+        starttime = time.time()
+        reducer = umap.UMAP(
+                        n_neighbors=n_neighbors,
+                        random_state=seed, 
+                        n_components=dimensions, 
+                        metric=metric,
+                        min_dist=min_dist)
+        if supervised:
+            clip_extractor = Clipper("ViT-L/14", device=device, hidden_state=hidden, norm_embs=hidden)
+            emb = None
+            with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.float16):
+                for batch in tqdm(range(0,len(y_train),128)):
+                    image_batch = y_train[batch:batch+128].to(device)
+
+                    emb0 = clip_extractor.embed_image(image_batch).float()
+                    emb0 = nn.functional.normalize(emb0.flatten(1),dim=-1)
+                    
+                    if emb is None:
+                        emb = emb0.to('cpu')
+                    else:
+                        emb = torch.vstack((emb, emb0.to('cpu')))
+                        
+            reducer = reducer.fit(x_train, emb)
+        else:
+            reducer = reducer.fit(x_train)
+        print(f"UMAP fitted, took {time.time() - starttime:.2f}s")
+        print(f"Saving UMAP model to file: {umap_filename}")
+        pickle.dump(reducer, open(umap_filename, 'wb'))
+    
+    return reducer
+
+def apply_umap(
+    data,
+    umap):
+    
+    print("Transforming data...")
+    data_reduced = umap.transform(data.cpu().numpy())
+    data_upscaled = torch.from_numpy(umap.inverse_transform(data_reduced))
+    print(data.shape, data_upscaled.shape)
+    
+    return data_upscaled
